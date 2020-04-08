@@ -856,6 +856,105 @@ func TestIntegrationMITM(t *testing.T) {
 	}
 }
 
+func TestIntegrationSkipMITM(t *testing.T) {
+	t.Parallel()
+
+	l, err := net.Listen("tcp", "[::]:0")
+	if err != nil {
+		t.Fatalf("net.Listen(): got %v, want no error", err)
+	}
+
+	p := NewProxy()
+	defer p.Close()
+
+	tr := martiantest.NewTransport()
+	tr.Func(func(req *http.Request) (*http.Response, error) {
+		res := proxyutil.NewResponse(200, nil, req)
+		res.Header.Set("Request-Scheme", req.URL.Scheme)
+
+		return res, nil
+	})
+
+	p.SetRoundTripper(tr)
+	p.SetTimeout(600 * time.Millisecond)
+
+	ca, priv, err := mitm.NewAuthority("martian.proxy", "Martian Authority", 2*time.Hour)
+	if err != nil {
+		t.Fatalf("mitm.NewAuthority(): got %v, want no error", err)
+	}
+
+	mc, err := mitm.NewConfig(ca, priv)
+	if err != nil {
+		t.Fatalf("mitm.NewConfig(): got %v, want no error", err)
+	}
+	p.SetMITM(mc)
+	// skipping MITM for all requests
+	p.SkipMITM(func(req *http.Request) bool {
+		return true
+	})
+
+	tm := martiantest.NewModifier()
+	reqerr := errors.New("request error")
+	reserr := errors.New("response error")
+	tm.RequestError(reqerr)
+	tm.ResponseError(reserr)
+
+	p.SetRequestModifier(tm)
+	p.SetResponseModifier(tm)
+
+	go p.Serve(l)
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatalf("net.Dial(): got %v, want no error", err)
+	}
+	defer conn.Close()
+
+	req, err := http.NewRequest("CONNECT", "//example.com:443", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest(): got %v, want no error", err)
+	}
+
+	// CONNECT example.com:443 HTTP/1.1
+	// Host: example.com
+	if err := req.Write(conn); err != nil {
+		t.Fatalf("req.Write(): got %v, want no error", err)
+	}
+
+	// Response MITM'd from proxy.
+	res, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("http.ReadResponse(): got %v, want no error", err)
+	}
+	if got, want := res.StatusCode, 200; got != want {
+
+		t.Errorf("res.StatusCode: got %d, want %d", got, want)
+	}
+	if got, want := res.Header.Get("Warning"), reserr.Error(); !strings.Contains(got, want) {
+		t.Errorf("res.Header.Get(%q): got %q, want to contain %q", "Warning", got, want)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+
+	tlsconn := tls.Client(conn, &tls.Config{
+		ServerName: "example.com",
+		RootCAs:    roots,
+	})
+	defer tlsconn.Close()
+
+	req, err = http.NewRequest("GET", "https://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest(): got %v, want no error", err)
+	}
+
+	// GET / HTTP/1.1
+	// Host: example.com
+	if err := req.Write(tlsconn); err == nil {
+		t.Fatalf("req.Write(): got no error, want error after skipping mitm")
+	}
+}
+
 func TestIntegrationTransparentHTTP(t *testing.T) {
 	t.Parallel()
 

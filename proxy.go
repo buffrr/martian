@@ -57,6 +57,7 @@ type Proxy struct {
 	dial         func(string, string) (net.Conn, error)
 	timeout      time.Duration
 	mitm         *mitm.Config
+	skipMITM     func(req *http.Request) bool
 	proxyURL     *url.URL
 	conns        sync.WaitGroup
 	connsMu      sync.Mutex // protects conns.Add/Wait from concurrent access
@@ -118,6 +119,11 @@ func (p *Proxy) SetTimeout(timeout time.Duration) {
 // SetMITM sets the config to use for MITMing of CONNECT requests.
 func (p *Proxy) SetMITM(config *mitm.Config) {
 	p.mitm = config
+}
+
+// SkipMITM sets a func to handle whether the request should be MITMed.
+func (p *Proxy) SkipMITM(skipFunc func(req *http.Request) bool) {
+	p.skipMITM = skipFunc
 }
 
 // SetDial sets the dial func used to establish a connection.
@@ -295,7 +301,7 @@ func (p *Proxy) handleConnectRequest(ctx *Context, req *http.Request, session *S
 		return nil
 	}
 
-	if p.mitm != nil {
+	if p.mitm != nil && (p.skipMITM == nil || !p.skipMITM(req)) {
 		log.Debugf("martian: attempting MITM for connection: %s / %s", req.Host, req.URL.String())
 
 		res := proxyutil.NewResponse(200, nil, req)
